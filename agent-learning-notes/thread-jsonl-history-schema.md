@@ -443,7 +443,7 @@ interface CompactedPayload {
 
 ## 7. `event_msg`
 
-事件使用二级判别字段 `payload.type`。注意 `turn_started` 和 `turn_complete` 在 JSONL 里按旧 wire 名称保存为 `task_started`、`task_complete`。
+事件使用二级判别字段 `payload.type`。源码里的事件枚举名是 `TurnStarted` / `TurnComplete`，但 JSONL wire 字段不会写成 `turn_started` / `turn_complete`；它们按旧协议名称保存为 `task_started` / `task_complete`，同时反序列化时兼容 `turn_started` / `turn_complete`。
 
 ```ts
 type StoredEventMsg = LimitedStoredEventMsg | ExtendedOnlyStoredEventMsg;
@@ -847,7 +847,7 @@ interface DynamicToolCallResponseEvent {
       -> 找最新仍然有效的 compact replacement_history
       -> 找最新 turn_context，作为上下文 diff baseline
       -> 累计 thread_rolled_back 要丢弃的用户 turn 数
-      -> 识别 turn_started / turn_complete / user_message / response_item 形成 turn segment
+      -> 识别 task_started / task_complete / user_message / response_item 形成 turn segment
   -> 从 compact checkpoint 之后正向重放
       -> response_item 进入内存历史
       -> compact 有 replacement_history 时替换内存历史
