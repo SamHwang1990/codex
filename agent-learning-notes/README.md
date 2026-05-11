@@ -17,6 +17,8 @@
 | `thread-jsonl-history-schema.md` | 用 TypeScript 表达 thread JSONL 里会保存的历史结构，并说明每类结构的来源、含义和恢复语义。 | 想搞清 thread/session/turn/prompt 里的“历史”分别是什么。 |
 | `first-sampling-prompt-structure.md` | 详细拆解 regular user turn 首次发给模型的 prompt/request 包含哪些信息、来源和处理逻辑，并给出 TypeScript 数据结构。 | 想自己实现 prompt 构造器和 Web Word agent 首次采样请求。 |
 | `model-response-turn-lifecycle.md` | 解释模型收到复合 prompt 后如何通过 stream 返回推理、工具、plan、用户输入请求和最终消息，以及 agent 如何转成事件、历史和 turn complete。 | 想理解模型返回后的处理过程和 Web Word agent 的运行时事件模型。 |
+| `turn-items-persistence-and-resampling.md` | 解释 turn 过程中的 item 如何写入 thread JSONL、哪些会保存、保存前后如何处理，以及哪些会在同 turn 或后续 turn 的采样中再次发给模型。 | 想把 JSONL 运行日志、session 内存历史和模型 prompt 历史彻底分清。 |
+| `event-msg-production-consumption.md` | 专门拆解 `event_msg` 的生产者、统一发送链路、落盘策略、app-server 实时消费、JSONL 重放消费，以及它如何间接影响模型历史。 | 看完 item/历史笔记后，想继续搞清 UI 事件、控制流事件和持久化事件。 |
 | `history-questions-dialogue.md` | 记录本轮围绕“历史”的连续疑问、问题脉络和当前结论。 | 想回看自己为什么会困惑，以及每个问题对应哪份笔记。 |
 | `completion-audit.md` | 把用户目标映射到目录内具体产物和证据。 | 检查学习资料覆盖面。 |
 
