@@ -129,6 +129,76 @@ interface FirstSamplingModelRequest {
 }
 ```
 
+这个结构不是“业界所有模型统一遵守的标准入参”。它更准确地说是 Codex 的 prompt 抽象经过一次转换后，发给 OpenAI Responses API 的请求形状。
+
+上面的 `FirstSamplingModelRequest` 用的是便于理解的 TypeScript/camelCase 表达。Codex 真正发给 OpenAI Responses API 的 wire 字段更接近下面这样：
+
+```ts
+interface OpenAIResponsesRequest {
+  model: string;
+  instructions?: string;
+  input: ResponseItem[];
+  tools: unknown[];
+  tool_choice: "auto";
+  parallel_tool_calls: boolean;
+  reasoning?: ReasoningRequest;
+  store: boolean;
+  stream: true;
+  include: string[];
+  service_tier?: string;
+  prompt_cache_key?: string;
+  text?: OpenAITextControls;
+  client_metadata?: Record<string, string>;
+}
+```
+
+在一个通用 agent 里，建议拆成两层理解：
+
+```ts
+interface AgentPrompt {
+  /**
+   * agent 自己维护的通用 prompt 抽象。
+   * 这层应该稳定，不直接绑定某个模型厂商。
+   */
+  instructions: string;
+  input: PromptInputItem[];
+  tools: ModelVisibleTool[];
+  sampling: SamplingOptions;
+}
+
+interface ProviderRequest {
+  /**
+   * 具体模型厂商/API 需要的请求体。
+   * 例如 OpenAI Responses API、Chat Completions、Anthropic Messages、内部模型协议。
+   */
+  body: unknown;
+  headers?: Record<string, string>;
+}
+
+interface ProviderAdapter {
+  toProviderRequest(prompt: AgentPrompt): ProviderRequest;
+}
+```
+
+Codex 在这里做的是：
+
+```text
+session history / turn context / tools / config
+  -> AgentPrompt
+  -> OpenAI Responses API request
+  -> SSE 或 WebSocket stream
+```
+
+如果换成别的模型，通常会再做 provider adapter，例如：
+
+| Codex 抽象 | OpenAI Responses API | 其他模型常见映射 |
+| --- | --- | --- |
+| `instructions` | 顶层 `instructions` | 可能转成 system/developer message |
+| `input` | `input: ResponseItem[]` | 可能转成 `messages: Message[]` |
+| `tools` | Responses tools JSON | 可能转成 function/tool schema |
+| `reasoning` | `reasoning` 字段 | 可能不支持，或映射成 vendor 私有字段 |
+| `text.format` | JSON schema 输出约束 | 可能转成 response format、tool-only 输出，或 prompt 约束 |
+
 ## 4. `instructions`: 基础指令
 
 ```ts
@@ -189,7 +259,7 @@ interface MessageInputItem {
 type ContentItem =
   | { type: "input_text"; text: string }
   | { type: "output_text"; text: string }
-  | { type: "input_image"; imageUrl: string; detail?: "auto" | "low" | "high" | "original" };
+  | { type: "input_image"; image_url: string; detail?: "auto" | "low" | "high" | "original" };
 ```
 
 首次采样时，真正发给模型的 `input` 是一个数组：
@@ -272,6 +342,53 @@ interface ContextualUserMessage extends MessageInputItem {
 }
 ```
 
+它的来源不是 thread JSONL 里的某一条现成 prompt，而是当前 `TurnContext` 和 session 状态实时渲染出来的。
+
+```ts
+interface TurnContextSnapshot {
+  model: string;
+  cwd: string;
+  environments: Array<{ id?: string; cwd: string; shell?: string }>;
+  approvalPolicy: string;
+  permissionProfile: string;
+  collaborationMode: string;
+  realtimeActive?: boolean;
+  personality?: string;
+  currentDate?: string;
+  timezone?: string;
+  network?: {
+    allowedDomains: string[];
+    deniedDomains: string[];
+  };
+}
+
+interface ContextBaselineState {
+  /**
+   * session 内存里的“上一次上下文快照”。
+   * 用来判断本轮是否需要 full initial context，还是只需要 settings diff。
+   */
+  referenceContextItem?: TurnContextSnapshot;
+
+  /**
+   * 持久化到 thread JSONL 的最新 turn_context。
+   * resume 后可以恢复 referenceContextItem。
+   */
+  persistedTurnContextItems: TurnContextSnapshot[];
+}
+```
+
+完整流程：
+
+```text
+本轮 TurnContext 创建完成
+  -> 读取 session.referenceContextItem
+  -> 如果没有 baseline：build_initial_context(turnContext)
+  -> 如果已有 baseline：build_settings_update_items(previous, current)
+  -> 把生成的 context message 写入 session history
+  -> 无论有没有 diff，都把 current TurnContext 持久化为 turn_context
+  -> session.referenceContextItem = current TurnContext
+```
+
 ### 7.1 Developer 上下文
 
 ```ts
@@ -318,7 +435,150 @@ interface DeveloperContextSections {
 4. multi-agent usage hint 可能单独成为一个 developer message。
 5. guardian policy 在 guardian 场景下单独成为一个 developer message。
 
-### 7.2 Contextual user 上下文
+Developer 上下文的语义：
+
+- 它是“应用/开发者给模型的运行规则”，优先级高于普通 user message。
+- 它不是用户当前任务，而是 agent 框架对模型的约束、能力说明、权限说明和运行策略。
+- 模型并不会通过某个隐藏 API “理解 availableSkillsInstructions 是 skills 列表”；它看到的是一个 `role="developer"` 的 message，内容用 XML/Markdown 风格标签组织，模型按 developer 指令优先级解释。
+- 如果你的 Web Word agent 没有 developer role，可以把这类内容映射到 system message，或放在比用户任务更高优先级的内部指令通道。
+
+`availableSkillsInstructions` 和后续 Skill 注入不是一回事：
+
+```ts
+interface AvailableSkillsInstructionsBlock {
+  role: "developer";
+  purpose: "告诉模型有哪些 skill 可用，以及如何触发/加载 skill";
+  contains: Array<{
+    name: string;
+    description?: string;
+    path: string;
+  }>;
+}
+
+interface InjectedSkillContextBlock {
+  role: "user";
+  purpose: "用户本轮已经显式选中或提到某个 skill，把该 skill 的完整 SKILL.md 内容注入给模型";
+  contains: {
+    name: string;
+    path: string;
+    contents: string;
+  };
+}
+```
+
+区别：
+
+| 项 | `availableSkillsInstructions` | 后续 Skill 注入 |
+| --- | --- | --- |
+| role | developer | user |
+| 时机 | 初始上下文或 full reinjection | 当前 turn 解析到 skill mention 后 |
+| 内容粒度 | skill 名称、描述、路径、使用规则 | 具体某个 skill 的完整内容 |
+| 作用 | 让模型知道“有哪些能力可选” | 让模型真正获得“这个能力怎么用”的详细说明 |
+| token 成本 | 受 metadata budget 限制，尽量轻 | 只注入被触发的 skill，内容更重 |
+
+### 7.2 initial 的来源和组装
+
+```ts
+interface InitialContextAssembly {
+  source: {
+    turnContext: TurnContextSnapshot;
+    sessionConfiguration: {
+      baseInstructions: string;
+      collaborationMode: string;
+      sessionSource: string;
+    };
+    runtimeServices: {
+      execPolicy: string;
+      shell: string;
+      mcpConnectors: unknown[];
+      skills: unknown[];
+      plugins: unknown[];
+      subagents?: string;
+    };
+    projectInstructions?: string;
+  };
+  output: Array<DeveloperContextMessage | ContextualUserMessage>;
+}
+```
+
+组装算法：
+
+```text
+build_initial_context(turnContext)
+  -> 初始化 developerSections = []
+  -> 初始化 contextualUserSections = []
+  -> 如果模型相对上一 turn 变化：加入 modelSwitch
+  -> 如果启用权限说明：加入 permissions
+  -> 如果有 developer instructions：加入 developerInstructions
+  -> 如果启用 memory：加入 memoryToolInstructions
+  -> 如果有 collaboration mode 指令：加入 collaborationModeInstructions
+  -> 如果 realtime 需要说明：加入 realtimeInstructions
+  -> 如果 personality 没有 baked in base instructions：加入 personalityInstructions
+  -> 如果启用 apps/connectors：查询 MCP/app connector，加入 appsInstructions
+  -> 如果启用 skills instructions：渲染可用 skill 摘要，加入 availableSkillsInstructions
+  -> 查询已加载 plugins：加入 availablePluginsInstructions
+  -> 如果启用 commit attribution：加入 commitAttributionInstructions
+  -> 如果有 AGENTS.md/用户项目指令：加入 contextual user sections
+  -> 如果启用 environment context：加入 cwd/shell/date/timezone/network/subagents
+  -> developerSections 聚合成 developer message
+  -> contextualUserSections 聚合成 user message
+  -> 特殊场景下 multi-agent hint / guardian policy 拆成独立 developer message
+```
+
+注意：`instructions` 顶层字段不在这里组装。`build_initial_context` 只负责 `input` 数组里的上下文 message。
+
+### 7.3 diff 的维护和组装
+
+```ts
+interface ContextDiffAssembly {
+  previous: TurnContextSnapshot;
+  current: TurnContextSnapshot;
+  emittedItems: Array<DeveloperContextMessage | ContextualUserMessage>;
+  persistedCurrentSnapshot: TurnContextSnapshot;
+}
+```
+
+如果在 turn 运行期间多次修改设置，要区分两类：
+
+1. **已经创建的当前 turn**：它使用创建时解析出来的 `TurnContext`。普通配置刷新不会随意改写正在采样的 prompt。
+2. **后续 turn**：新的用户输入到来时，会用最新配置创建新的 `TurnContext`，再和 session 里的 `referenceContextItem` 做 diff。
+
+session 内部维护的是“最新 baseline”，不是一串待发送的设置修改事件：
+
+```text
+turn A 开始
+  -> current = TurnContext(A)
+  -> previous = session.referenceContextItem
+  -> 发送 full 或 diff
+  -> 持久化 turn_context(A)
+  -> session.referenceContextItem = A
+
+turn A 运行中配置被修改多次
+  -> 已经发出去的 prompt 不回滚
+  -> 已运行的工具/采样按 turn A 的上下文继续
+
+turn B 开始
+  -> current = TurnContext(B)，读取最新配置
+  -> previous = session.referenceContextItem，也就是 A
+  -> 只渲染 A -> B 的最终差异
+  -> 持久化 turn_context(B)
+  -> session.referenceContextItem = B
+```
+
+diff 当前覆盖的主要字段：
+
+| diff 类型 | 比较逻辑 | 生成的 message |
+| --- | --- | --- |
+| environment | cwd/date/timezone/network/subagents 变化；shell 比较时特殊处理 | contextual user message |
+| permissions | permission profile 或 approval policy 变化 | developer message |
+| collaboration mode | collaboration mode 变化且新模式有说明 | developer message |
+| realtime | realtime active 状态变化 | developer message |
+| personality | 同模型下 personality 变化 | developer message |
+| model instructions | 上一 turn 模型和当前模型不同 | developer message |
+
+源码里也明确留了 TODO：diff 还不是 full initial context 的 100% 完整可逆差分。有些内容仍依赖持久化 baseline、resume/replay 和 full reinjection 来保证恢复。
+
+### 7.4 Contextual user 上下文
 
 ```ts
 interface ContextualUserSections {
@@ -366,10 +626,10 @@ interface EnvironmentContext {
 ```ts
 type UserInput =
   | { type: "text"; text: string; textElements?: TextElement[] }
-  | { type: "image"; imageUrl: string }
-  | { type: "localImage"; path: string }
-  | { type: "skill"; name?: string; path?: string }
-  | { type: "mention"; target: string; label?: string };
+  | { type: "image"; image_url: string }
+  | { type: "local_image"; path: string }
+  | { type: "skill"; name: string; path: string }
+  | { type: "mention"; name: string; path: string };
 
 interface CurrentUserMessage extends MessageInputItem {
   type: "message";
@@ -396,6 +656,76 @@ interface TextElement {
 | text elements | 保留给 UI/event；`ResponseItem::Message` 本身不携带这些 span |
 
 当前用户输入会被写入 session history，再参与首次采样。
+
+“skill mention 不直接进入当前 user message”的意思是：用户输入数组里可以有结构化的 skill 选择项，但把 `Vec<UserInput>` 转成模型可见 `CurrentUserMessage` 时，`skill` 和 `mention` 两类 item 会返回空内容。
+
+```ts
+const userInputs: UserInput[] = [
+  { type: "text", text: "用这个规范检查当前实现" },
+  { type: "skill", name: "code-review", path: "/skills/code-review/SKILL.md" },
+];
+
+const currentUserMessage: CurrentUserMessage = {
+  type: "message",
+  role: "user",
+  content: [
+    { type: "input_text", text: "用这个规范检查当前实现" }
+  ]
+};
+
+const laterSkillContext: MessageInputItem = {
+  type: "message",
+  role: "user",
+  content: [
+    {
+      type: "input_text",
+      text: "<skill>\\n<name>code-review</name>\\n<path>/skills/code-review/SKILL.md</path>\\n...完整 SKILL.md 内容...\\n</skill>"
+    }
+  ]
+};
+```
+
+这样做的好处是：当前用户任务保持干净；skill 内容作为独立上下文块注入，便于记录、审计、预算控制和去重。
+
+`CurrentUserMessage.content` 的顺序有要求。它按用户输入数组顺序展开，图片会被包在文本标签之间：
+
+```ts
+const userInputs: UserInput[] = [
+  { type: "text", text: "看这张图：" },
+  { type: "image", image_url: "data:image/png;base64,..." },
+  { type: "text", text: "然后总结问题" }
+];
+
+const content: ContentItem[] = [
+  { type: "input_text", text: "看这张图：" },
+  { type: "input_text", text: "<image>" },
+  { type: "input_image", image_url: "data:image/png;base64,...", detail: "high" },
+  { type: "input_text", text: "</image>" },
+  { type: "input_text", text: "然后总结问题" }
+];
+```
+
+数组里允许 `type` 重复，例如多个 `input_text`、多张 `input_image` 都可以。语义靠顺序表达。
+
+“at 文件、代码段”在当前 Codex 这层没有独立的 `file` 或 `code_block` content type。常见表达方式是：
+
+```ts
+type RichUserInputStrategy =
+  | {
+      kind: "plain_text_expansion";
+      meaning: "把 @file 或代码段直接渲染进 text，例如 Markdown fenced code block";
+    }
+  | {
+      kind: "structured_mention";
+      meaning: "用 UserInput.mention 保存结构化目标，例如 app://、plugin://、skill://，后续解析成独立上下文或工具选择";
+    }
+  | {
+      kind: "text_element_metadata";
+      meaning: "UI 层保留 span/placeholder，模型请求里通常只看到 text";
+    };
+```
+
+映射到 Web Word，可以把 `@段落`、`@评论`、`@选区`设计成结构化 mention，但在发模型前最好解析成独立上下文块，而不是只把 `@xxx` 原样塞进用户文本。
 
 ## 9. Hook 附加上下文
 
@@ -559,10 +889,11 @@ interface ReasoningRequest {
 
 interface OutputFormatRequest {
   verbosity?: "low" | "medium" | "high" | string;
-  jsonSchema?: {
-    name?: string;
-    schema: JsonSchema;
+  format?: {
+    type: "json_schema";
+    name: string;
     strict: boolean;
+    schema: JsonSchema;
   };
 }
 ```
@@ -581,7 +912,208 @@ interface OutputFormatRequest {
 3. 如果有 final output JSON schema，会构造 text/output format。
 4. guardian reviewer 这类特殊来源会关闭严格 schema 校验。
 
-## 13. 首次采样的典型 input 示例
+Codex 发给 OpenAI Responses API 时，对应的是 `text` 字段：
+
+```ts
+interface OpenAITextControls {
+  verbosity?: "low" | "medium" | "high";
+  format?: {
+    type: "json_schema";
+    name: "codex_output_schema";
+    strict: boolean;
+    schema: JsonSchema;
+  };
+}
+```
+
+例子 1：只控制输出详细程度。
+
+```json
+{
+  "text": {
+    "verbosity": "low"
+  }
+}
+```
+
+例子 2：要求最终答案符合 JSON schema。
+
+```json
+{
+  "text": {
+    "verbosity": "medium",
+    "format": {
+      "type": "json_schema",
+      "name": "codex_output_schema",
+      "strict": true,
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "summary": { "type": "string" },
+          "actions": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        },
+        "required": ["summary", "actions"]
+      }
+    }
+  }
+}
+```
+
+对 Web Word 来说，一个常见输出 schema 可以是：
+
+```ts
+interface WebWordAgentOutput {
+  summary: string;
+  documentOperations: Array<
+    | { type: "replace_range"; rangeId: string; text: string }
+    | { type: "insert_comment"; anchorId: string; text: string }
+    | { type: "suggestion"; title: string; rationale: string }
+  >;
+  needsUserConfirmation: boolean;
+}
+```
+
+这类 schema 适合约束“最终答复结构”，但不应该替代工具调用。真正修改文档仍建议走工具，由工具校验 document revision、权限和 range id。
+
+## 13. 模型会返回怎样的数据
+
+模型返回不是一个单独字符串，而是一串流式事件。Codex 把 provider stream 解析成内部事件，再转成 UI/event/history 可用的 `ResponseItem`。
+
+```ts
+type ModelStreamEvent =
+  | { type: "created" }
+  | { type: "output_item_added"; item: ResponseItem }
+  | { type: "output_item_done"; item: ResponseItem }
+  | { type: "output_text_delta"; delta: string }
+  | { type: "tool_call_input_delta"; itemId: string; callId?: string; delta: string }
+  | { type: "reasoning_summary_delta"; delta: string; summaryIndex: number }
+  | { type: "reasoning_content_delta"; delta: string; contentIndex: number }
+  | { type: "reasoning_summary_part_added"; summaryIndex: number }
+  | { type: "completed"; responseId: string; tokenUsage?: TokenUsage; endTurn?: boolean }
+  | { type: "rate_limits"; snapshot: unknown }
+  | { type: "server_model"; model: string };
+
+type ResponseItem =
+  | AssistantMessageItem
+  | ReasoningItem
+  | FunctionCallItem
+  | CustomToolCallItem
+  | LocalShellCallItem
+  | WebSearchCallItem
+  | ImageGenerationCallItem
+  | ToolSearchCallItem
+  | ToolOutputItem
+  | { type: "other" };
+
+interface AssistantMessageItem {
+  type: "message";
+  role: "assistant";
+  content: Array<{ type: "output_text"; text: string }>;
+  phase?: "commentary" | "final_answer";
+}
+
+interface ReasoningItem {
+  type: "reasoning";
+  summary: Array<{ type?: string; text?: string }>;
+  content?: Array<{ type: "reasoning_text" | "text"; text: string }>;
+  encrypted_content?: string;
+}
+
+interface FunctionCallItem {
+  type: "function_call";
+  name: string;
+  namespace?: string;
+  arguments: string; // JSON 字符串，不是已解析对象
+  call_id: string;
+}
+
+interface CustomToolCallItem {
+  type: "custom_tool_call";
+  call_id: string;
+  name: string;
+  input: string;
+  status?: string;
+}
+
+interface LocalShellCallItem {
+  type: "local_shell_call";
+  call_id?: string;
+  status: string;
+  action: unknown;
+}
+
+interface WebSearchCallItem {
+  type: "web_search_call";
+  status?: string;
+  action?: unknown;
+}
+
+interface ImageGenerationCallItem {
+  type: "image_generation_call";
+  id: string;
+  status: string;
+  revised_prompt?: string;
+  result: string;
+}
+
+interface ToolSearchCallItem {
+  type: "tool_search_call";
+  call_id?: string;
+  status?: string;
+  execution: string;
+  arguments: unknown;
+}
+
+type ToolOutputItem =
+  | { type: "function_call_output"; call_id: string; output: string | FunctionCallOutputContentItem[] }
+  | { type: "custom_tool_call_output"; call_id: string; name?: string; output: string | FunctionCallOutputContentItem[] }
+  | { type: "tool_search_output"; call_id?: string; status: string; execution: string; tools: unknown[] };
+
+type FunctionCallOutputContentItem =
+  | { type: "input_text"; text: string }
+  | { type: "input_image"; image_url: string };
+
+interface TokenUsage {
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  reasoningOutputTokens: number;
+  totalTokens: number;
+}
+```
+
+首轮采样返回后有两种大分支：
+
+```text
+模型返回 assistant message
+  -> 记录 assistant message 到 session history
+  -> 如果 completed/endTurn，不需要 follow-up
+  -> turn 可以结束
+
+模型返回 tool call
+  -> 记录 tool call 到 session history
+  -> agent 执行工具
+  -> 把 tool output 写回 session history
+  -> needs_follow_up = true
+  -> 下一次采样把“历史 + tool output”再发给模型
+```
+
+流式 delta 和完成 item 的关系：
+
+| 事件 | 用途 |
+| --- | --- |
+| `output_item_added` | 通知 UI 某个 assistant message / reasoning / tool call 开始 |
+| `output_text_delta` | assistant 文本增量，用于边生成边展示 |
+| `tool_call_input_delta` | 工具参数增量，用于展示工具调用参数逐步形成 |
+| `reasoning_summary_delta` | reasoning 摘要增量 |
+| `output_item_done` | 某个完整 item 完成；这时可记录进 history 或执行工具 |
+| `completed` | 整个 response 完成；更新 token usage，判断是否还要 follow-up |
+
+## 14. 首次采样的典型 input 示例
 
 新 thread 的第一个用户 turn，抽象后大致是：
 
@@ -617,7 +1149,7 @@ const input: PromptInputItem[] = [
 
 如果用户显式提到 skill/plugin/app，后面还可能追加对应上下文 item。若是 resume/fork，则这个数组前面会有从历史重建出的 prior history。
 
-## 14. 发送前的最后处理
+## 15. 发送前的最后处理
 
 ```ts
 interface FinalPromptProcessing {
@@ -643,7 +1175,7 @@ interface FinalPromptProcessing {
 - 如果当前工具列表含 freeform `apply_patch`，shell/apply_patch 输出会转成更适合模型理解的文本形式。
 - 图片是否保留取决于模型 input modalities。
 
-## 15. Web Word Agent 可借鉴的 Prompt 结构
+## 16. Web Word Agent 可借鉴的 Prompt 结构
 
 如果映射到 Web Word，建议这样设计：
 
@@ -717,8 +1249,11 @@ interface WebWordTurnRuntime {
 | turn 首次采样前记录上下文、用户输入、skill/plugin 注入 | `codex-rs/core/src/session/turn.rs` |
 | Prompt 顶层结构 | `codex-rs/core/src/client_common.rs` |
 | Prompt 转 Responses API request | `codex-rs/core/src/client.rs` |
+| Responses API request / text controls / stream event | `codex-rs/codex-api/src/common.rs` |
+| Responses SSE completed usage 解析 | `codex-rs/codex-api/src/sse/responses.rs` |
 | 初始上下文构造 | `codex-rs/core/src/session/mod.rs` |
 | 上下文 diff 构造 | `codex-rs/core/src/context_manager/updates.rs` |
 | 环境上下文格式 | `codex-rs/core/src/context/environment_context.rs` |
 | 用户输入转 ResponseInputItem | `codex-rs/protocol/src/models.rs` |
+| skill mention 解析和 skill 注入 | `codex-rs/core-skills/src/injection.rs`, `codex-rs/core/src/context/skill_instructions.rs` |
 | 工具 spec 结构 | `codex-rs/tools/src/tool_spec.rs`, `codex-rs/tools/src/responses_api.rs` |
