@@ -16,6 +16,7 @@
 | `turn-domain-deep-dive.md` | 深入拆解 Turn 的业务逻辑、状态、流程、事件、工具回灌和中断。 | 设计自己 agent 的“单次任务执行”核心。 |
 | `thread-jsonl-history-schema.md` | 用 TypeScript 表达 thread JSONL 里会保存的历史结构，并说明每类结构的来源、含义和恢复语义。 | 想搞清 thread/session/turn/prompt 里的“历史”分别是什么。 |
 | `first-sampling-prompt-structure.md` | 详细拆解 regular user turn 首次发给模型的 prompt/request 包含哪些信息、来源和处理逻辑，并给出 TypeScript 数据结构。 | 想自己实现 prompt 构造器和 Web Word agent 首次采样请求。 |
+| `model-response-turn-lifecycle.md` | 解释模型收到复合 prompt 后如何通过 stream 返回推理、工具、plan、用户输入请求和最终消息，以及 agent 如何转成事件、历史和 turn complete。 | 想理解模型返回后的处理过程和 Web Word agent 的运行时事件模型。 |
 | `history-questions-dialogue.md` | 记录本轮围绕“历史”的连续疑问、问题脉络和当前结论。 | 想回看自己为什么会困惑，以及每个问题对应哪份笔记。 |
 | `completion-audit.md` | 把用户目标映射到目录内具体产物和证据。 | 检查学习资料覆盖面。 |
 
