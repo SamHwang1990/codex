@@ -22,6 +22,7 @@
 | `turn-tool-discovery-call-model-flow.md` | 详细列出 turn 期间工具的发现、direct/deferred 暴露、ToolRouter/ToolRegistry、模型 tool call、ToolRuntime 执行、权限/hooks、结果回灌和后续采样逻辑。 | 想设计自己 agent 的工具系统，尤其是 Web Word 的读写工具、审批和动态工具。 |
 | `history-questions-dialogue.md` | 记录本轮围绕“历史”的连续疑问、问题脉络和当前结论。 | 想回看自己为什么会困惑，以及每个问题对应哪份笔记。 |
 | `completion-audit.md` | 把用户目标映射到目录内具体产物和证据。 | 检查学习资料覆盖面。 |
+| `codex-agent-learning-synthesis/` | 把本次围绕 Codex agent 的完整学习过程二次整理成连续专题：学习地图、领域模型、turn/history、prompt/model/tools、持久化/UI 事件、Web Word 落地。 | 想快速回顾整轮学习结论，而不是逐篇翻原始笔记。 |
 
 ## 一条推荐学习路径
 
