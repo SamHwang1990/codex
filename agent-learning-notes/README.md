@@ -13,6 +13,7 @@
 | `agent-design-tradeoffs.md` | 汇总本仓库 agent 方案里的关键设计取舍、为什么这么做、替代方案和代价。 | 做方案设计或评审时参考。 |
 | `agent-implementation-roadmap.md` | 给出按源码入口学习和扩展 agent 功能的路线图。 | 准备修改代码、定位问题、加能力。 |
 | `web-word-agent-implementation-blueprint.md` | 把 Codex 的 agent 设计抽象成可用于自研 Web Word 产品的落地蓝图。 | 准备自己实现 agent，而不是维护 Codex 仓库。 |
+| `pure-frontend-agent-design.md` | 基于本目录学习成果，给出纯前端 agent 的技术方案、架构方案、产品功能交互方案，并重点说明扁平 DDD core 如何串联调度。 | 准备评审或落地浏览器内 agent 架构。 |
 | `turn-domain-deep-dive.md` | 深入拆解 Turn 的业务逻辑、状态、流程、事件、工具回灌和中断。 | 设计自己 agent 的“单次任务执行”核心。 |
 | `thread-jsonl-history-schema.md` | 用 TypeScript 表达 thread JSONL 里会保存的历史结构，并说明每类结构的来源、含义和恢复语义。 | 想搞清 thread/session/turn/prompt 里的“历史”分别是什么。 |
 | `first-sampling-prompt-structure.md` | 详细拆解 regular user turn 首次发给模型的 prompt/request 包含哪些信息、来源和处理逻辑，并给出 TypeScript 数据结构。 | 想自己实现 prompt 构造器和 Web Word agent 首次采样请求。 |
@@ -29,11 +30,12 @@
 如果目标是自己实现一个和公司 Web Word 产品结合的 agent，推荐这样读：
 
 1. 先读 `web-word-agent-implementation-blueprint.md`，把目标落到自己的产品架构、工具、权限和数据模型上。
-2. 再读 `core-agent-business-logic-guide.md`，建立“agent 是任务执行闭环，不只是模型调用”的心智模型。
-3. 读 `turn-domain-deep-dive.md`，重点掌握一次用户任务如何启动、运行、调用工具、等待审批、完成或中断。
-4. 再读 `agent-feature-scenarios.md`，把聊天、代码修改、审批、MCP、skills、plugins、多 agent、resume/fork 等能力抽象成可复用场景。
-5. 然后读 `agent-design-tradeoffs.md`，理解哪些设计值得借鉴，哪些对 Web Word 可以简化。
-6. 最后读 `agent-development-architecture-guide.md` 和 `agent-implementation-roadmap.md`，在需要对照 Codex 源码时查入口。
+2. 读 `pure-frontend-agent-design.md`，把 Web Word agent 进一步收敛成浏览器内可落地的技术、架构和产品交互方案。
+3. 再读 `core-agent-business-logic-guide.md`，建立“agent 是任务执行闭环，不只是模型调用”的心智模型。
+4. 读 `turn-domain-deep-dive.md`，重点掌握一次用户任务如何启动、运行、调用工具、等待审批、完成或中断。
+5. 再读 `agent-feature-scenarios.md`，把聊天、代码修改、审批、MCP、skills、plugins、多 agent、resume/fork 等能力抽象成可复用场景。
+6. 然后读 `agent-design-tradeoffs.md`，理解哪些设计值得借鉴，哪些对 Web Word 可以简化。
+7. 最后读 `agent-development-architecture-guide.md` 和 `agent-implementation-roadmap.md`，在需要对照 Codex 源码时查入口。
 
 ## 本目录对“完整 agent 功能”的定义
 
