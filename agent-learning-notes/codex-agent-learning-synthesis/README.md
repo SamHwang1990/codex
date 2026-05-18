@@ -20,6 +20,7 @@
 | 5 | `05-persistence-and-ui-events.md` | item/event_msg/thread JSONL 的保存、恢复、UI 展示和模型历史有什么区别。 |
 | 6 | `06-web-word-agent-design.md` | 如果自己实现 Web Word agent，应该抽取哪些架构和数据模型。 |
 | 7 | `07-source-cross-reference.md` | 原始笔记和源码入口对照，方便以后回查。 |
+| 8 | `08-flat-state-sequence-flow.md` | 按扁平化方式整理 thread、session、turn、prompt、tool、history、event、approval、compact/rollback/fork 和 Web Word 映射的状态机、时序图、业务流程图。 |
 
 ## 一句话总结
 
@@ -44,4 +45,3 @@ Codex agent 不是“把聊天记录发给模型”的简单程序，而是一�
 - prompt 是每次采样前临时组装的模型输入，不等于持久历史。
 - tool 是产品能力的安全出口，不是模型直接访问产品数据库。
 - event 是 UI 和观测的实时状态流，不等于模型历史。
-
