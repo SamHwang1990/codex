@@ -212,7 +212,11 @@ impl CommandAction {
 pub enum ThreadItem {
     #[serde(rename_all = "camelCase")]
     #[ts(rename_all = "camelCase")]
-    UserMessage { id: String, content: Vec<UserInput> },
+    UserMessage {
+        id: String,
+        client_id: Option<String>,
+        content: Vec<UserInput>,
+    },
     #[serde(rename_all = "camelCase")]
     #[ts(rename_all = "camelCase")]
     HookPrompt {
@@ -286,6 +290,7 @@ pub enum ThreadItem {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         mcp_app_resource_uri: Option<String>,
+        plugin_id: Option<String>,
         result: Option<Box<McpToolCallResult>>,
         error: Option<McpToolCallError>,
         /// The duration of the MCP tool call in milliseconds.
@@ -775,6 +780,7 @@ impl From<CoreTurnItem> for ThreadItem {
         match value {
             CoreTurnItem::UserMessage(user) => ThreadItem::UserMessage {
                 id: user.id,
+                client_id: user.client_id,
                 content: user.content.into_iter().map(UserInput::from).collect(),
             },
             CoreTurnItem::HookPrompt(hook_prompt) => ThreadItem::HookPrompt {
@@ -846,6 +852,7 @@ impl From<CoreTurnItem> for ThreadItem {
                     status: McpToolCallStatus::from(mcp.status),
                     arguments: mcp.arguments,
                     mcp_app_resource_uri: mcp.mcp_app_resource_uri,
+                    plugin_id: mcp.plugin_id,
                     result: mcp.result.map(McpToolCallResult::from).map(Box::new),
                     error: mcp.error.map(McpToolCallError::from),
                     duration_ms,
@@ -1073,6 +1080,9 @@ pub struct ItemStartedNotification {
 pub struct ItemGuardianApprovalReviewStartedNotification {
     pub thread_id: String,
     pub turn_id: String,
+    /// Unix timestamp (in milliseconds) when this review started.
+    #[ts(type = "number")]
+    pub started_at_ms: i64,
     /// Stable identifier for this review.
     pub review_id: String,
     /// Identifier for the reviewed item or tool call when one exists.
@@ -1099,6 +1109,12 @@ pub struct ItemGuardianApprovalReviewStartedNotification {
 pub struct ItemGuardianApprovalReviewCompletedNotification {
     pub thread_id: String,
     pub turn_id: String,
+    /// Unix timestamp (in milliseconds) when this review started.
+    #[ts(type = "number")]
+    pub started_at_ms: i64,
+    /// Unix timestamp (in milliseconds) when this review completed.
+    #[ts(type = "number")]
+    pub completed_at_ms: i64,
     /// Stable identifier for this review.
     pub review_id: String,
     /// Identifier for the reviewed item or tool call when one exists.
@@ -1248,6 +1264,9 @@ pub struct CommandExecutionRequestApprovalParams {
     pub thread_id: String,
     pub turn_id: String,
     pub item_id: String,
+    /// Unix timestamp (in milliseconds) when this approval request started.
+    #[ts(type = "number")]
+    pub started_at_ms: i64,
     /// Unique identifier for this specific approval callback.
     ///
     /// For regular shell/unified_exec approvals, this is null.
@@ -1321,6 +1340,9 @@ pub struct FileChangeRequestApprovalParams {
     pub thread_id: String,
     pub turn_id: String,
     pub item_id: String,
+    /// Unix timestamp (in milliseconds) when this approval request started.
+    #[ts(type = "number")]
+    pub started_at_ms: i64,
     /// Optional explanatory reason (e.g. request for extra write access).
     #[ts(optional = nullable)]
     pub reason: Option<String>,

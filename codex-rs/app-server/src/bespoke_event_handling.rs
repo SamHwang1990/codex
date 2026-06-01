@@ -4,6 +4,7 @@ use crate::outgoing_message::ClientRequestResult;
 use crate::outgoing_message::ThreadScopedOutgoingMessageSender;
 use crate::request_processors::populate_thread_turns_from_history;
 use crate::request_processors::thread_from_stored_thread;
+use crate::request_processors::thread_settings_from_core_snapshot;
 use crate::server_request_error::is_turn_transition_server_request_error;
 use crate::thread_state::ThreadState;
 use crate::thread_state::TurnSummary;
@@ -49,7 +50,6 @@ use codex_app_server_protocol::RawResponseItemCompletedNotification;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequestPayload;
-use codex_app_server_protocol::SkillsChangedNotification;
 use codex_app_server_protocol::ThreadGoalUpdatedNotification;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadRealtimeClosedNotification;
@@ -61,6 +61,7 @@ use codex_app_server_protocol::ThreadRealtimeStartedNotification;
 use codex_app_server_protocol::ThreadRealtimeTranscriptDeltaNotification;
 use codex_app_server_protocol::ThreadRealtimeTranscriptDoneNotification;
 use codex_app_server_protocol::ThreadRollbackResponse;
+use codex_app_server_protocol::ThreadSettingsUpdatedNotification;
 use codex_app_server_protocol::ThreadStatus;
 use codex_app_server_protocol::ThreadTokenUsage;
 use codex_app_server_protocol::ThreadTokenUsageUpdatedNotification;
@@ -193,13 +194,6 @@ pub(crate) async fn apply_bespoke_event_handling(
                 &thread_state,
             )
             .await;
-        }
-        EventMsg::SkillsUpdateAvailable => {
-            outgoing
-                .send_server_notification(ServerNotification::SkillsChanged(
-                    SkillsChangedNotification {},
-                ))
-                .await;
         }
         EventMsg::McpStartupUpdate(update) => {
             let (status, error) = match update.status {
@@ -511,6 +505,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                 thread_id: conversation_id.to_string(),
                 turn_id: event.turn_id.clone(),
                 item_id: item_id.clone(),
+                started_at_ms: event.started_at_ms,
                 reason: event.reason.clone(),
                 grant_root: event.grant_root.clone(),
             };
@@ -542,6 +537,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                 call_id,
                 approval_id,
                 turn_id,
+                started_at_ms,
                 command,
                 cwd,
                 reason,
@@ -615,6 +611,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                 thread_id: conversation_id.to_string(),
                 turn_id: turn_id.clone(),
                 item_id: call_id.clone(),
+                started_at_ms,
                 approval_id: approval_id.clone(),
                 reason,
                 network_approval_context,
@@ -764,6 +761,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                 thread_id: conversation_id.to_string(),
                 turn_id: request.turn_id.clone(),
                 item_id: request.call_id.clone(),
+                started_at_ms: request.started_at_ms,
                 cwd: request_cwd.clone(),
                 reason: request.reason,
                 permissions: request.permissions.into(),
@@ -776,6 +774,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                 requested_permissions,
                 request_cwd,
                 pending_request_id,
+                outgoing,
                 receiver: rx,
                 request_permissions_guard: permission_guard,
             };
@@ -1202,6 +1201,24 @@ pub(crate) async fn apply_bespoke_event_handling(
                     notification,
                 ))
                 .await;
+        }
+        EventMsg::ThreadSettingsApplied(thread_settings_event) => {
+            let thread_settings =
+                thread_settings_from_core_snapshot(thread_settings_event.thread_settings);
+            let changed = {
+                let mut state = thread_state.lock().await;
+                state.note_thread_settings(thread_settings.clone())
+            };
+            if changed {
+                outgoing
+                    .send_server_notification(ServerNotification::ThreadSettingsUpdated(
+                        ThreadSettingsUpdatedNotification {
+                            thread_id: conversation_id.to_string(),
+                            thread_settings,
+                        },
+                    ))
+                    .await;
+            }
         }
         EventMsg::TurnDiff(turn_diff_event) => {
             handle_turn_diff(conversation_id, &event_turn_id, turn_diff_event, &outgoing).await;
@@ -1749,11 +1766,12 @@ async fn on_request_permissions_response(
         requested_permissions,
         request_cwd,
         pending_request_id,
+        outgoing,
         receiver,
         request_permissions_guard,
     } = pending_response;
     let response = receiver.await;
-    resolve_server_request_on_thread_listener(&thread_state, pending_request_id).await;
+    resolve_server_request_on_thread_listener(&thread_state, pending_request_id.clone()).await;
     drop(request_permissions_guard);
     let Some(response) = request_permissions_response_from_client_result(
         requested_permissions,
@@ -1762,6 +1780,7 @@ async fn on_request_permissions_response(
     ) else {
         return;
     };
+    outgoing.track_effective_permissions_approval_response(pending_request_id, response.clone());
 
     if let Err(err) = conversation
         .submit(Op::RequestPermissionsResponse {
@@ -1779,6 +1798,7 @@ struct PendingRequestPermissionsResponse {
     requested_permissions: CoreRequestPermissionProfile,
     request_cwd: AbsolutePathBuf,
     pending_request_id: RequestId,
+    outgoing: ThreadScopedOutgoingMessageSender,
     receiver: oneshot::Receiver<ClientRequestResult>,
     request_permissions_guard: ThreadWatchActiveGuard,
 }
@@ -2075,6 +2095,7 @@ mod tests {
     use codex_protocol::items::build_hook_prompt_message;
     use codex_protocol::models::FileSystemPermissions as CoreFileSystemPermissions;
     use codex_protocol::models::NetworkPermissions as CoreNetworkPermissions;
+    use codex_protocol::models::PermissionProfile;
     use codex_protocol::permissions::FileSystemAccessMode;
     use codex_protocol::permissions::FileSystemPath;
     use codex_protocol::permissions::FileSystemSandboxEntry;
@@ -2090,7 +2111,6 @@ mod tests {
     use codex_protocol::protocol::RateLimitSnapshot;
     use codex_protocol::protocol::RateLimitWindow;
     use codex_protocol::protocol::RolloutItem;
-    use codex_protocol::protocol::SandboxPolicy;
     use codex_protocol::protocol::SessionSource;
     use codex_protocol::protocol::TokenUsage;
     use codex_protocol::protocol::TokenUsageInfo;
@@ -2133,10 +2153,12 @@ mod tests {
         let created_at = Utc::now();
         let history_items = vec![
             RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
+                client_id: None,
                 message: "before rollback".to_string(),
                 images: None,
                 local_images: Vec::new(),
                 text_elements: Vec::new(),
+                ..Default::default()
             })),
             RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
                 message: "after rollback".to_string(),
@@ -2165,7 +2187,7 @@ mod tests {
             agent_path: None,
             git_info: None,
             approval_mode: AskForApproval::OnRequest,
-            sandbox_policy: SandboxPolicy::new_read_only_policy(),
+            permission_profile: PermissionProfile::read_only(),
             token_usage: None,
             first_user_message: Some("before rollback".to_string()),
             history: Some(StoredThreadHistory {
@@ -2186,7 +2208,7 @@ mod tests {
 
         assert_eq!(response.thread.id, thread_id.to_string());
         assert_eq!(response.thread.path, None);
-        assert_eq!(response.thread.preview, "before rollback");
+        assert_eq!(response.thread.preview, "fallback preview");
         assert_eq!(response.thread.name.as_deref(), Some("Rollback thread"));
         assert_eq!(response.thread.status, ThreadStatus::NotLoaded);
         assert_eq!(response.thread.turns.len(), 1);
@@ -2249,6 +2271,9 @@ mod tests {
             id: format!("review-{id}"),
             target_item_id: Some(id.to_string()),
             turn_id: turn_id.to_string(),
+            started_at_ms: 1_000,
+            completed_at_ms: (!matches!(status, GuardianAssessmentStatus::InProgress))
+                .then_some(1_042),
             status,
             risk_level,
             user_authorization,
@@ -2313,6 +2338,8 @@ mod tests {
                 id: "review-1".to_string(),
                 target_item_id: Some("item-1".to_string()),
                 turn_id: String::new(),
+                started_at_ms: 1_000,
+                completed_at_ms: None,
                 status: codex_protocol::protocol::GuardianAssessmentStatus::InProgress,
                 risk_level: None,
                 user_authorization: None,
@@ -2326,6 +2353,7 @@ mod tests {
             ServerNotification::ItemGuardianApprovalReviewStarted(payload) => {
                 assert_eq!(payload.thread_id, conversation_id.to_string());
                 assert_eq!(payload.turn_id, "turn-from-event");
+                assert_eq!(payload.started_at_ms, 1_000);
                 assert_eq!(payload.review_id, "review-1");
                 assert_eq!(payload.target_item_id.as_deref(), Some("item-1"));
                 assert_eq!(
@@ -2356,6 +2384,8 @@ mod tests {
                 id: "review-2".to_string(),
                 target_item_id: Some("item-2".to_string()),
                 turn_id: "turn-from-assessment".to_string(),
+                started_at_ms: 1_000,
+                completed_at_ms: Some(1_042),
                 status: codex_protocol::protocol::GuardianAssessmentStatus::Denied,
                 risk_level: Some(codex_protocol::protocol::GuardianRiskLevel::High),
                 user_authorization: Some(codex_protocol::protocol::GuardianUserAuthorization::Low),
@@ -2371,6 +2401,8 @@ mod tests {
             ServerNotification::ItemGuardianApprovalReviewCompleted(payload) => {
                 assert_eq!(payload.thread_id, conversation_id.to_string());
                 assert_eq!(payload.turn_id, "turn-from-assessment");
+                assert_eq!(payload.started_at_ms, 1_000);
+                assert_eq!(payload.completed_at_ms, 1_042);
                 assert_eq!(payload.review_id, "review-2");
                 assert_eq!(payload.target_item_id.as_deref(), Some("item-2"));
                 assert_eq!(payload.decision_source, AutoReviewDecisionSource::Agent);
@@ -2406,6 +2438,8 @@ mod tests {
                 id: "review-3".to_string(),
                 target_item_id: None,
                 turn_id: "turn-from-assessment".to_string(),
+                started_at_ms: 1_000,
+                completed_at_ms: Some(1_042),
                 status: codex_protocol::protocol::GuardianAssessmentStatus::Aborted,
                 risk_level: None,
                 user_authorization: None,
@@ -3186,6 +3220,7 @@ mod tests {
                 "turn-1",
                 &EventMsg::TurnStarted(codex_protocol::protocol::TurnStartedEvent {
                     turn_id: "turn-1".to_string(),
+                    trace_id: None,
                     started_at: Some(42),
                     model_context_window: None,
                     collaboration_mode_kind: Default::default(),
@@ -3194,10 +3229,12 @@ mod tests {
             state.track_current_turn_event(
                 "turn-1",
                 &EventMsg::UserMessage(codex_protocol::protocol::UserMessageEvent {
+                    client_id: None,
                     message: "already tracked".to_string(),
                     images: None,
                     local_images: Vec::new(),
                     text_elements: Vec::new(),
+                    ..Default::default()
                 }),
             );
         }
@@ -3218,6 +3255,7 @@ mod tests {
                 id: "turn-1".to_string(),
                 msg: EventMsg::TurnStarted(codex_protocol::protocol::TurnStartedEvent {
                     turn_id: "turn-1".to_string(),
+                    trace_id: None,
                     started_at: Some(42),
                     model_context_window: None,
                     collaboration_mode_kind: Default::default(),
@@ -3267,6 +3305,7 @@ mod tests {
                 &event_turn_id,
                 &EventMsg::TurnStarted(codex_protocol::protocol::TurnStartedEvent {
                     turn_id: event_turn_id.clone(),
+                    trace_id: None,
                     started_at: Some(42),
                     model_context_window: None,
                     collaboration_mode_kind: Default::default(),

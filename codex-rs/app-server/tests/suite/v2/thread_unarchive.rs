@@ -81,6 +81,7 @@ async fn thread_unarchive_moves_rollout_back_into_sessions_directory() -> Result
     let turn_start_id = mcp
         .send_turn_start_request(TurnStartParams {
             thread_id: thread.id.clone(),
+            client_user_message_id: None,
             input: vec![UserInput::Text {
                 text: "materialize".to_string(),
                 text_elements: Vec::new(),
@@ -226,7 +227,7 @@ async fn thread_unarchive_preserves_pathless_store_metadata() -> Result<()> {
         .update_thread_metadata(UpdateThreadMetadataParams {
             thread_id,
             patch: ThreadMetadataPatch {
-                name: Some("named pathless thread".to_string()),
+                name: Some(Some("named pathless thread".to_string())),
                 ..Default::default()
             },
             include_archived: true,
@@ -245,6 +246,7 @@ async fn thread_unarchive_preserves_pathless_store_metadata() -> Result<()> {
         config: Arc::new(config),
         cli_overrides: Vec::new(),
         loader_overrides,
+        strict_config: false,
         cloud_requirements: CloudRequirementsLoader::default(),
         thread_config_loader: Arc::new(codex_config::NoopThreadConfigLoader),
         feedback: CodexFeedback::new(),

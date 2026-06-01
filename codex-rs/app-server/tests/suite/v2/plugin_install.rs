@@ -1,6 +1,8 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -21,6 +23,8 @@ use axum::http::header::AUTHORIZATION;
 use axum::routing::get;
 use codex_app_server_protocol::AppInfo;
 use codex_app_server_protocol::AppSummary;
+use codex_app_server_protocol::AppsListParams;
+use codex_app_server_protocol::AppsListResponse;
 use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::PluginAuthPolicy;
 use codex_app_server_protocol::PluginAvailability;
@@ -132,7 +136,7 @@ async fn plugin_install_rejects_multiple_install_sources() -> Result<()> {
             marketplace_path: Some(AbsolutePathBuf::try_from(
                 codex_home.path().join("marketplace.json"),
             )?),
-            remote_marketplace_name: Some("openai-curated".to_string()),
+            remote_marketplace_name: Some("openai-curated-remote".to_string()),
             plugin_name: "sample-plugin".to_string(),
         })
         .await?;
@@ -167,7 +171,7 @@ plugins = false
     let request_id = mcp
         .send_plugin_install_request(PluginInstallParams {
             marketplace_path: None,
-            remote_marketplace_name: Some("chatgpt-global".to_string()),
+            remote_marketplace_name: Some("openai-curated-remote".to_string()),
             plugin_name: "plugins~Plugin_22222222222222222222222222222222".to_string(),
         })
         .await?;
@@ -193,15 +197,32 @@ async fn plugin_install_writes_remote_plugin_to_cloud_and_cache() -> Result<()> 
     let server = MockServer::start().await;
     let installed_path = codex_home
         .path()
-        .join("plugins/cache/chatgpt-global/linear/1.2.3");
+        .join("plugins/cache/openai-curated-remote/linear/1.2.3");
+    let remote_app_manifest = json!({
+        "apps": {
+            "linear-remote": {
+                "id": "remote-linear-app"
+            }
+        }
+    });
     let bundle_url = mount_remote_plugin_bundle(
         &server,
         /*status_code*/ 200,
-        remote_plugin_bundle_tar_gz_bytes("linear")?,
+        remote_plugin_bundle_tar_gz_bytes_with_contents(
+            r#"{"name":"linear","version":"0.0.1"}"#,
+            Some(r#"{"apps":{"linear-bundled":{"id":"bundled-linear-app"}}}"#),
+        )?,
     )
     .await;
     configure_remote_plugin_test(codex_home.path(), &server)?;
-    mount_remote_plugin_detail(&server, REMOTE_PLUGIN_ID, "1.2.3", Some(&bundle_url)).await;
+    mount_remote_plugin_detail_with_app_manifest(
+        &server,
+        REMOTE_PLUGIN_ID,
+        "1.2.3",
+        Some(&bundle_url),
+        remote_app_manifest.clone(),
+    )
+    .await;
     mount_empty_remote_installed_plugins(&server).await;
     mount_remote_plugin_install_after_cache_write(
         &server,
@@ -247,12 +268,20 @@ async fn plugin_install_writes_remote_plugin_to_cloud_and_cache() -> Result<()> 
     )
     .await?;
     assert!(installed_path.join(".codex-plugin/plugin.json").is_file());
+    let installed_plugin_manifest: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(installed_path.join(".codex-plugin/plugin.json"))?,
+    )?;
+    assert_eq!(installed_plugin_manifest["name"], json!("linear"));
+    assert_eq!(installed_plugin_manifest["version"], json!("1.2.3"));
+    let installed_app_manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(installed_path.join(".app.json"))?)?;
+    assert_eq!(installed_app_manifest, remote_app_manifest);
     assert!(installed_path.join("skills/plan-work/SKILL.md").is_file());
     assert!(
         !codex_home
             .path()
             .join(format!(
-                "plugins/cache/chatgpt-global/{REMOTE_PLUGIN_ID}/1.2.3"
+                "plugins/cache/openai-curated-remote/{REMOTE_PLUGIN_ID}/1.2.3"
             ))
             .exists()
     );
@@ -299,7 +328,7 @@ async fn plugin_install_rejects_missing_remote_bundle_url() -> Result<()> {
     assert!(
         !codex_home
             .path()
-            .join("plugins/cache/chatgpt-global/linear")
+            .join("plugins/cache/openai-curated-remote/linear")
             .exists()
     );
     Ok(())
@@ -340,7 +369,7 @@ async fn plugin_install_rejects_plain_http_remote_bundle_url() -> Result<()> {
     assert!(
         !codex_home
             .path()
-            .join("plugins/cache/chatgpt-global/linear")
+            .join("plugins/cache/openai-curated-remote/linear")
             .exists()
     );
     Ok(())
@@ -382,7 +411,7 @@ async fn plugin_install_rejects_invalid_remote_release_version() -> Result<()> {
     assert!(
         !codex_home
             .path()
-            .join("plugins/cache/chatgpt-global/linear")
+            .join("plugins/cache/openai-curated-remote/linear")
             .exists()
     );
     Ok(())
@@ -398,7 +427,7 @@ async fn plugin_install_rejects_invalid_remote_plugin_name() -> Result<()> {
     let request_id = mcp
         .send_plugin_install_request(PluginInstallParams {
             marketplace_path: None,
-            remote_marketplace_name: Some("chatgpt-global".to_string()),
+            remote_marketplace_name: Some("openai-curated-remote".to_string()),
             plugin_name: "linear/../../oops".to_string(),
         })
         .await?;
@@ -468,7 +497,7 @@ async fn plugin_install_rejects_remote_plugin_disabled_by_admin_before_download(
     assert!(
         !codex_home
             .path()
-            .join("plugins/cache/chatgpt-global/linear")
+            .join("plugins/cache/openai-curated-remote/linear")
             .exists()
     );
     Ok(())
@@ -764,7 +793,7 @@ async fn plugin_install_tracks_remote_plugin_analytics_event() -> Result<()> {
                 "event_params": {
                     "plugin_id": REMOTE_PLUGIN_ID,
                     "plugin_name": "linear",
-                    "marketplace_name": "chatgpt-global",
+                    "marketplace_name": "openai-curated-remote",
                     "has_skills": true,
                     "mcp_server_count": 0,
                     "connector_ids": [],
@@ -824,7 +853,7 @@ async fn plugin_install_errors_when_remote_bundle_download_fails() -> Result<()>
     assert!(
         !codex_home
             .path()
-            .join("plugins/cache/chatgpt-global/linear")
+            .join("plugins/cache/openai-curated-remote/linear")
             .exists()
     );
     Ok(())
@@ -865,7 +894,7 @@ async fn plugin_install_returns_apps_needing_auth() -> Result<()> {
         },
     ];
     let tools = vec![connector_tool("beta", "Beta App")?];
-    let (server_url, server_handle) = start_apps_server(connectors, tools).await?;
+    let (server_url, server_handle, server_control) = start_apps_server(connectors, tools).await?;
 
     let codex_home = TempDir::new()?;
     write_connectors_config(codex_home.path(), &server_url)?;
@@ -893,6 +922,7 @@ async fn plugin_install_returns_apps_needing_auth() -> Result<()> {
 
     let mut mcp = McpProcess::new(codex_home.path()).await?;
     timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
+    let directory_requests_before_install = server_control.directory_request_count();
 
     let request_id = mcp
         .send_plugin_install_request(PluginInstallParams {
@@ -922,6 +952,7 @@ async fn plugin_install_returns_apps_needing_auth() -> Result<()> {
             }],
         }
     );
+    assert!(server_control.directory_request_count() > directory_requests_before_install);
 
     server_handle.abort();
     let _ = server_handle.await;
@@ -945,7 +976,8 @@ async fn plugin_install_filters_disallowed_apps_needing_auth() -> Result<()> {
         is_enabled: true,
         plugin_display_names: Vec::new(),
     }];
-    let (server_url, server_handle) = start_apps_server(connectors, Vec::new()).await?;
+    let (server_url, server_handle, server_control) =
+        start_apps_server(connectors, Vec::new()).await?;
 
     let codex_home = TempDir::new()?;
     write_connectors_config(codex_home.path(), &server_url)?;
@@ -977,6 +1009,8 @@ async fn plugin_install_filters_disallowed_apps_needing_auth() -> Result<()> {
 
     let mut mcp = McpProcess::new(codex_home.path()).await?;
     timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
+    let directory_requests_before_install =
+        warm_app_directory_cache(&mut mcp, &server_control, "Alpha").await?;
 
     let request_id = mcp
         .send_plugin_install_request(PluginInstallParams {
@@ -1005,6 +1039,10 @@ async fn plugin_install_filters_disallowed_apps_needing_auth() -> Result<()> {
                 needs_auth: true,
             }],
         }
+    );
+    assert_eq!(
+        server_control.directory_request_count(),
+        directory_requests_before_install
     );
 
     server_handle.abort();
@@ -1088,6 +1126,46 @@ async fn plugin_install_makes_bundled_mcp_servers_available_to_followup_requests
 #[derive(Clone)]
 struct AppsServerState {
     response: Arc<StdMutex<serde_json::Value>>,
+    directory_request_count: Arc<AtomicUsize>,
+}
+
+#[derive(Clone)]
+struct AppsServerControl {
+    directory_request_count: Arc<AtomicUsize>,
+}
+
+impl AppsServerControl {
+    fn directory_request_count(&self) -> usize {
+        self.directory_request_count.load(Ordering::SeqCst)
+    }
+}
+
+async fn warm_app_directory_cache(
+    mcp: &mut McpProcess,
+    server_control: &AppsServerControl,
+    expected_app_name: &str,
+) -> Result<usize> {
+    let app_list_request_id = mcp
+        .send_apps_list_request(AppsListParams {
+            force_refetch: true,
+            ..Default::default()
+        })
+        .await?;
+    let response: JSONRPCResponse = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(app_list_request_id)),
+    )
+    .await??;
+    let response: AppsListResponse = to_response(response)?;
+    assert!(
+        response
+            .data
+            .iter()
+            .any(|app| app.name == expected_app_name)
+    );
+    let directory_request_count = server_control.directory_request_count();
+    assert!(directory_request_count > 0);
+    Ok(directory_request_count)
 }
 
 #[derive(Clone)]
@@ -1097,10 +1175,7 @@ struct PluginInstallMcpServer {
 
 impl ServerHandler for PluginInstallMcpServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            ..ServerInfo::default()
-        }
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
     }
 
     fn list_tools(
@@ -1127,12 +1202,17 @@ impl ServerHandler for PluginInstallMcpServer {
 async fn start_apps_server(
     connectors: Vec<AppInfo>,
     tools: Vec<Tool>,
-) -> Result<(String, JoinHandle<()>)> {
+) -> Result<(String, JoinHandle<()>, AppsServerControl)> {
+    let directory_request_count = Arc::new(AtomicUsize::new(0));
     let state = Arc::new(AppsServerState {
         response: Arc::new(StdMutex::new(
             json!({ "apps": connectors, "next_token": null }),
         )),
+        directory_request_count: directory_request_count.clone(),
     });
+    let server_control = AppsServerControl {
+        directory_request_count,
+    };
     let tools = Arc::new(StdMutex::new(tools));
 
     let listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -1162,7 +1242,7 @@ async fn start_apps_server(
         let _ = axum::serve(listener, router).await;
     });
 
-    Ok((format!("http://{addr}"), handle))
+    Ok((format!("http://{addr}"), handle, server_control))
 }
 
 async fn list_directory_connectors(
@@ -1170,6 +1250,8 @@ async fn list_directory_connectors(
     headers: HeaderMap,
     uri: Uri,
 ) -> Result<impl axum::response::IntoResponse, StatusCode> {
+    state.directory_request_count.fetch_add(1, Ordering::SeqCst);
+
     let bearer_ok = headers
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -1349,6 +1431,24 @@ async fn mount_remote_plugin_detail(
     .await;
 }
 
+async fn mount_remote_plugin_detail_with_app_manifest(
+    server: &MockServer,
+    remote_plugin_id: &str,
+    release_version: &str,
+    bundle_download_url: Option<&str>,
+    app_manifest: serde_json::Value,
+) {
+    mount_remote_plugin_detail_with_status_and_app_manifest(
+        server,
+        remote_plugin_id,
+        release_version,
+        bundle_download_url,
+        PluginAvailability::Available,
+        Some(app_manifest),
+    )
+    .await;
+}
+
 async fn mount_remote_plugin_detail_with_status(
     server: &MockServer,
     remote_plugin_id: &str,
@@ -1356,12 +1456,34 @@ async fn mount_remote_plugin_detail_with_status(
     bundle_download_url: Option<&str>,
     status: PluginAvailability,
 ) {
+    mount_remote_plugin_detail_with_status_and_app_manifest(
+        server,
+        remote_plugin_id,
+        release_version,
+        bundle_download_url,
+        status,
+        /*app_manifest*/ None,
+    )
+    .await;
+}
+
+async fn mount_remote_plugin_detail_with_status_and_app_manifest(
+    server: &MockServer,
+    remote_plugin_id: &str,
+    release_version: &str,
+    bundle_download_url: Option<&str>,
+    status: PluginAvailability,
+    app_manifest: Option<serde_json::Value>,
+) {
     let status = match status {
         PluginAvailability::Available => "ENABLED",
         PluginAvailability::DisabledByAdmin => "DISABLED_BY_ADMIN",
     };
     let bundle_download_url_field = bundle_download_url
         .map(|url| format!(r#"    "bundle_download_url": "{url}","#))
+        .unwrap_or_default();
+    let app_manifest_field = app_manifest
+        .map(|manifest| format!(r#"    "app_manifest": {manifest},"#))
         .unwrap_or_default();
     let detail_body = format!(
         r#"{{
@@ -1377,6 +1499,7 @@ async fn mount_remote_plugin_detail_with_status(
     "display_name": "Linear",
     "description": "Track work in Linear",
     "app_ids": [],
+{app_manifest_field}
     "interface": {{
       "short_description": "Plan and track work"
     }},
@@ -1576,13 +1699,20 @@ fn write_plugin_source(
 
 fn remote_plugin_bundle_tar_gz_bytes(plugin_name: &str) -> Result<Vec<u8>> {
     let manifest = format!(r#"{{"name":"{plugin_name}"}}"#);
+    remote_plugin_bundle_tar_gz_bytes_with_contents(&manifest, /*app_manifest*/ None)
+}
+
+fn remote_plugin_bundle_tar_gz_bytes_with_contents(
+    plugin_manifest: &str,
+    app_manifest: Option<&str>,
+) -> Result<Vec<u8>> {
     let skill = "# Plan Work\n\nTrack work in Linear.\n";
     let encoder = GzEncoder::new(Vec::new(), Compression::default());
     let mut tar = tar::Builder::new(encoder);
-    for (path, contents, mode) in [
+    let mut entries = vec![
         (
             ".codex-plugin/plugin.json",
-            manifest.as_bytes(),
+            plugin_manifest.as_bytes(),
             /*mode*/ 0o644,
         ),
         (
@@ -1590,7 +1720,11 @@ fn remote_plugin_bundle_tar_gz_bytes(plugin_name: &str) -> Result<Vec<u8>> {
             skill.as_bytes(),
             /*mode*/ 0o644,
         ),
-    ] {
+    ];
+    if let Some(app_manifest) = app_manifest {
+        entries.push((".app.json", app_manifest.as_bytes(), /*mode*/ 0o644));
+    }
+    for (path, contents, mode) in entries {
         let mut header = tar::Header::new_gnu();
         header.set_size(contents.len() as u64);
         header.set_mode(mode);
