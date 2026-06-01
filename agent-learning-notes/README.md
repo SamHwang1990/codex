@@ -20,6 +20,7 @@
 | `turn-items-persistence-and-resampling.md` | 解释 turn 过程中的 item 如何写入 thread JSONL、哪些会保存、保存前后如何处理，以及哪些会在同 turn 或后续 turn 的采样中再次发给模型。 | 想把 JSONL 运行日志、session 内存历史和模型 prompt 历史彻底分清。 |
 | `event-msg-production-consumption.md` | 专门拆解 `event_msg` 的生产者、统一发送链路、落盘策略、app-server 实时消费、JSONL 重放消费，以及它如何间接影响模型历史。 | 看完 item/历史笔记后，想继续搞清 UI 事件、控制流事件和持久化事件。 |
 | `turn-tool-discovery-call-model-flow.md` | 详细列出 turn 期间工具的发现、direct/deferred 暴露、ToolRouter/ToolRegistry、模型 tool call、ToolRuntime 执行、权限/hooks、结果回灌和后续采样逻辑。 | 想设计自己 agent 的工具系统，尤其是 Web Word 的读写工具、审批和动态工具。 |
+| `2026-06-01-origin-main-merge-update.md` | 汇总本次 `origin/main` merge 后和 agent 学习资料相关的增量：archive CLI、thread-store permission profile、turn_context schema、config/requirements 分层、request_user_input 开关、multi-agent v2 命名。 | 合并上游后快速了解哪些心智模型和旧笔记需要更新。 |
 | `history-questions-dialogue.md` | 记录本轮围绕“历史”的连续疑问、问题脉络和当前结论。 | 想回看自己为什么会困惑，以及每个问题对应哪份笔记。 |
 | `completion-audit.md` | 把用户目标映射到目录内具体产物和证据。 | 检查学习资料覆盖面。 |
 | `codex-agent-learning-synthesis/` | 把本次围绕 Codex agent 的完整学习过程二次整理成连续专题：学习地图、领域模型、turn/history、prompt/model/tools、持久化/UI 事件、Web Word 落地。 | 想快速回顾整轮学习结论，而不是逐篇翻原始笔记。 |
@@ -41,7 +42,7 @@
 
 - 入口：CLI、TUI、exec、app-server、MCP server。
 - 会话：thread start/resume/fork/archive/read/list、turn start/steer/interrupt。
-- 上下文：历史、AGENTS.md、skills、plugins、apps/connectors、environment、collaboration mode、personality、output schema。
+- 上下文：历史、AGENTS.md、skills、plugins、apps/connectors、environment、config/requirements layers、collaboration mode、personality、output schema。
 - 模型：provider、Responses API、流式事件、重试、fallback、token usage。
 - 工具：shell、apply_patch、MCP、dynamic tools、tool search、image/view image、plan、goal、request user input、permissions。
 - 安全：approval policy、permission profile、sandbox、network policy、guardian、hooks。
@@ -71,4 +72,4 @@
 - Tool router/orchestrator: `codex-rs/core/src/tools/router.rs`, `codex-rs/core/src/tools/orchestrator.rs`
 - Multi agent: `codex-rs/core/src/agent/`, `codex-rs/core/src/tools/handlers/multi_agents*.rs`
 - MCP: `codex-rs/codex-mcp/src/connection_manager.rs`, `codex-rs/core/src/session/mcp.rs`
-- Config and permissions: `codex-rs/core/src/config/`, `codex-rs/core/src/exec_policy.rs`
+- Config and permissions: `codex-rs/config/src/`, `codex-rs/core/src/config/`, `codex-rs/core/src/exec_policy.rs`

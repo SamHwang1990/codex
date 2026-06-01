@@ -273,7 +273,7 @@ AGENTS.md 是项目本地规则；skills 是可复用流程知识；plugins 可�
 - `wait_agent`
 - `close_agent`
 - `resume_agent`
-- v2 的 list/message/followup 等工具。
+- v2 的 list/spawn/assign_task/send_message/wait/close 等工具。
 
 核心规则：
 

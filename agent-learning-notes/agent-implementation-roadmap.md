@@ -267,7 +267,7 @@ TUI 入口：
 3. 如果改变 app-server API，同步 v2 schema。
 4. 加 MCP processor/core tests。
 
-注意：仓库说明要求 MCP tool calls 优先利用 `codex-rs/codex-mcp/src/mcp_connection_manager.rs` 或现有连接管理抽象，减少层层透传。
+注意：仓库说明要求 MCP tool calls 优先利用 MCP connection manager 或现有连接管理抽象，减少层层透传；当前源码入口是 `codex-rs/codex-mcp/src/connection_manager.rs`。
 
 ### 新增多 agent 行为
 

@@ -366,14 +366,10 @@ type CollaborationMode = Json;
 type ReasoningEffortConfig = string;
 type ReasoningSummaryConfig = string | Json;
 
-type TruncationPolicy =
-  | { mode: "bytes"; limit: number }
-  | { mode: "tokens"; limit: number };
-
 interface TurnContextPayload {
   turn_id?: string;
-  trace_id?: string;
   cwd: PathString;
+  workspace_roots?: PathString[];
   current_date?: string;
   timezone?: string;
   approval_policy: AskForApproval;
@@ -389,11 +385,10 @@ interface TurnContextPayload {
   collaboration_mode?: CollaborationMode;
   realtime_active?: boolean;
   effort?: ReasoningEffortConfig;
+  /**
+   * 兼容旧版本反序列化用。当前恢复逻辑不再读取它重建 context。
+   */
   summary: ReasoningSummaryConfig;
-  user_instructions?: string;
-  developer_instructions?: string;
-  final_output_json_schema?: Json;
-  truncation_policy?: TruncationPolicy;
 }
 ```
 
@@ -401,22 +396,23 @@ interface TurnContextPayload {
 
 | 字段 | 来源 | 含义 |
 | --- | --- | --- |
-| `turn_id` / `trace_id` | turn 创建 | 把事件、工具调用、日志和该 turn 关联起来。 |
+| `turn_id` | turn 创建 | 把事件、工具调用、日志和该 turn 关联起来。 |
 | `cwd` | 当前 turn 运行环境 | 工具执行和上下文说明的工作目录。 |
+| `workspace_roots` | 当前环境/权限解析 | 物化 permission profile 里的 `:workspace_roots` 符号权限，保证恢复时能按当时工作区边界解释文件系统权限。 |
 | `current_date` / `timezone` | 环境上下文 | 发给模型的日期和时区上下文来源。 |
 | `approval_policy` | session/config/权限选择 | 决定 shell、权限、MCP elicitation 等是否向用户确认。 |
 | `sandbox_policy` | session/config | 旧版 sandbox 策略。恢复时可推导权限 profile。 |
-| `permission_profile` | 当前权限模型 | 新版细粒度权限快照。 |
+| `permission_profile` | 当前权限模型 | 新版细粒度权限快照。旧记录缺失时，会从 `sandbox_policy`、`file_system_sandbox_policy` 和网络策略推导。 |
 | `network` | 网络权限 | 本 turn 允许/拒绝的域名集合。 |
 | `file_system_sandbox_policy` | 文件系统权限 | 细粒度读写范围。 |
 | `model` / `effort` / `summary` | 模型选择 | 采样时使用的模型和推理设置。 |
 | `personality` / `collaboration_mode` | agent 行为配置 | 影响基础指令和协作方式。 |
 | `realtime_active` | realtime 状态 | 该 turn 是否处于实时对话。 |
-| `user_instructions` / `developer_instructions` | 配置/用户指令 | 持久的额外指令，不再放在 `session_meta`。 |
-| `final_output_json_schema` | 输出约束 | 要求最终输出符合的 JSON schema。 |
-| `truncation_policy` | 模型上下文策略 | 工具输出进入历史时的截断预算。 |
+| `summary` | 兼容字段 | 当前源码注释说明它主要用于旧版本反序列化兼容，不再作为 context reconstruction 的输入。 |
 
 业务上，`turn_context` 不是聊天消息。它是“下一次恢复时如何重新构造上下文 diff”的基线。
+
+注意：运行时 `TurnContext` 里还会有 trace、输出 schema、截断策略等信息，但这些不等于 `protocol::TurnContextItem` 的 JSONL 落盘字段。读 JSONL schema 时要以 `codex-rs/protocol/src/protocol.rs` 的 `TurnContextItem` 为准。
 
 ## 6. `compacted`
 

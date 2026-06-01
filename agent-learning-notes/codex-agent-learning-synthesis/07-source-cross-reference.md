@@ -45,11 +45,11 @@
 | tool spec 构造 | `codex-rs/core/src/tools/spec.rs` |
 | plan tool spec | `codex-rs/core/src/tools/spec_plan.rs` |
 | MCP tool exposure | `codex-rs/core/src/mcp_tool_exposure.rs` |
-| MCP connection manager | `codex-rs/codex-mcp/src/mcp_connection_manager.rs` |
+| MCP connection manager | `codex-rs/codex-mcp/src/connection_manager.rs` |
 | 多 agent | `codex-rs/core/src/agent/` |
 | 多 agent tool handlers | `codex-rs/core/src/tools/handlers/multi_agents*.rs` |
 | 持久化/rollout | `codex-rs/core/src/rollout/` |
-| 配置和权限 | `codex-rs/core/src/config/`, `codex-rs/core/src/exec_policy.rs` |
+| 配置和权限 | `codex-rs/config/src/`, `codex-rs/core/src/config/`, `codex-rs/core/src/exec_policy.rs` |
 
 ## 3. 后续学习建议
 
