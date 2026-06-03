@@ -14,7 +14,7 @@ Web WPS Agent 是运行在浏览器内的文档协作运行主干。用户通过
 - Node.js 服务只代理模型请求。
 - 运行历史保存在浏览器 IndexedDB。
 - Thread 只保存元数据。
-- AgentStore 按 `threadId` 分区保存运行数据。
+- AgentStore 按 `threadId` 分区保存运行数据，主历史结构采用 Vercel AI SDK 的 `UIMessage`。
 - JSAPI 只定义 delayed search 原则。具体执行协议、metadata、沙箱、dry-run、写入识别等能力，等接入真实 codebase 时再设计。
 - 默认权限为 `requestApproval`。
 
@@ -28,7 +28,7 @@ ThreadStore[threadId]
   -> thread metadata
 
 AgentStore[threadId]
-  -> flattened runtime state
+  -> AI SDK UIMessage history + thin runtime indexes
 ```
 
 Thread 和 Agent 是平级概念：
@@ -39,11 +39,11 @@ Thread 和 Agent 是平级概念：
 | Agent | 唯一运行主干，持有并处理运行时数据。 |
 | Session | 领域语言，表示 Agent 打开某个 Thread 后形成的运行视图。 |
 | Turn | 领域语言，表示一次用户目标的执行过程。 |
-| Item | 领域语言，表示模型可见历史里的结构化事实。 |
-| EventMessage | 领域语言，表示 UI 和审计事件。 |
+| Item | 领域语言，表示 `UIMessage.parts` 中的模型消息、工具调用、工具结果、数据 part 等结构化事实。 |
+| EventMessage | 领域语言，表示 AI SDK stream chunk、`data-*` part、tool state 或 message metadata 所表达的 UI 和审计事件。 |
 | Context | 领域语言，表示 Turn 开始时生成的上下文快照。 |
 
-Session、Turn、Item、EventMessage、Context 是产品语义和 service 视图，不要求一一映射为 IndexedDB store 或 Agent state 顶层数组。底层运行数据按使用路径打平组织。
+Session、Turn、Item、EventMessage、Context 是产品语义和 service 视图，不要求一一映射为 IndexedDB store 或 Agent state 顶层数组。底层主历史优先使用 AI SDK `UIMessage`，避免维护多套相似但不同的数据结构。
 
 ## Thread ID
 
@@ -90,6 +90,59 @@ Thread 操作：
 AgentStore 按 `threadId` 分区：
 
 ```ts
+import type { UIMessage } from "ai";
+
+type WpsMessageMetadata = {
+  threadId: string;
+  turnId?: string;
+  userIdentity: string;
+  documentId: string;
+  documentVersion?: string;
+  effectivePermission?: "requestApproval" | "fullAccess";
+  createdAt: number;
+};
+
+type WpsDataParts = {
+  "agent-status": {
+    status: "idle" | "running" | "waitingApproval" | "failed" | "interrupted";
+    phase?: string;
+  };
+  "context-snapshot": {
+    documentId: string;
+    documentVersion?: string;
+    selection?: unknown;
+    viewport?: unknown;
+    permission: "requestApproval" | "fullAccess";
+  };
+  "change-plan": {
+    changePlanId: string;
+    summary: string;
+    affectedRanges: Array<{ id: string; textPreview?: string }>;
+  };
+  "document-preview": {
+    previewId: string;
+    kind: "replace" | "format" | "numbering" | "other";
+  };
+  citation: {
+    citationId: string;
+    range?: unknown;
+    label?: string;
+  };
+};
+
+type WpsTools = {
+  jsapiSearch: {
+    input: { query: string; limit?: number };
+    output: { matches: unknown[] };
+  };
+  applyChangePlan: {
+    input: { changePlanId: string };
+    output: { applied: boolean; summary: string };
+  };
+};
+
+type WpsAgentUIMessage = UIMessage<WpsMessageMetadata, WpsDataParts, WpsTools>;
+
 type AgentRuntimeState = {
   metadataRef: {
     threadId: string;
@@ -104,25 +157,7 @@ type AgentRuntimeState = {
     lastError?: unknown;
   };
 
-  modelVisibleHistory: ModelHistoryItem[];
-
-  eventMessages: AgentEventMessage[];
-
-  contextSnapshots: ContextSnapshot[];
-
-  pendingInteractions: {
-    approval?: ApprovalRequest;
-    blockedReason?: string;
-  };
-
-  artifacts: {
-    changePlans: ChangePlan[];
-    changeSummaries: ChangeSummary[];
-    citations: Citation[];
-    previews: PreviewArtifact[];
-  };
-
-  attachments: AttachmentState[];
+  messages: WpsAgentUIMessage[];
 
   runtimeConfig: {
     model?: string;
@@ -139,7 +174,51 @@ type AgentRuntimeState = {
 };
 ```
 
-这个结构是说明性的，不是强制数据库 schema。实现时可以为了 IndexedDB 查询、恢复、性能或 compact 继续打平或归一化。
+这个结构是说明性的，不是强制数据库 schema。设计意图是：AgentStore 的主历史只有一份 `messages`，它同时服务 UI 渲染、流式更新、恢复和模型消息转换。`runState`、`runtimeConfig`、`caches` 只是薄运行索引和可丢弃缓存。
+
+## AI SDK 数据承载原则
+
+前端技术栈预计使用 Vercel AI SDK。Agent 历史应尽量直接使用 AI SDK 的数据形态，避免在 `EventMessage`、`Item`、`modelVisibleHistory` 之间重复建模。
+
+| WPS 需求 | AI SDK 表达 |
+| --- | --- |
+| 用户输入 | `UIMessage` with `role: "user"`，内容用 `text` / `file` parts。 |
+| Agent 回复 | `UIMessage` with `role: "assistant"`，内容用 `text` parts。 |
+| Reasoning 摘要 | `reasoning` part 或 `reasoning-*` stream chunks。 |
+| JSAPI 能力发现 | 类型化 `tool-jsapiSearch` 或 `dynamic-tool`。 |
+| Turn 级 ChangePlan | 非 transient `data-change-plan` part。 |
+| 文档预览 | 非 transient `data-document-preview` part。 |
+| 引用定位 | 非 transient `data-citation` part。 |
+| 运行状态 | `data-agent-status` chunk；临时进度用 `transient: true`。 |
+| Context snapshot | `message.metadata` 或 `data-context-snapshot` part。 |
+| 文件 | AI SDK `file` part。 |
+| 审批 | `applyChangePlan` tool approval。 |
+
+`data-*` part 有两种用法：
+
+- 非 transient：进入最终 `messages[].parts`，用于恢复、展示和审计。
+- `transient: true`：只作为临时流式事件触发 UI，不进入最终 message state，适合“正在搜索 JSAPI”“正在生成预览”等进度提示。
+
+`data-*` 默认不进入模型。需要让模型看到的数据，应优先表达为标准 tool call、tool result、approval response、assistant text 或 reasoning summary。只有少数 WPS 专属数据确实需要进入模型时，才通过 AI SDK 的 `convertDataPart` 显式转换。
+
+## AI SDK 消息转换
+
+Agent 调模型时，以 `messages` 为唯一历史来源：
+
+```text
+AgentRuntimeState.messages
+-> convertToModelMessages(messages, { tools, convertDataPart })
+-> ModelMessage[]
+-> streamText / ToolLoopAgent
+```
+
+约束：
+
+- 不再维护独立的 `modelVisibleHistory`。
+- 不再维护独立的 `eventMessages` 时间线。
+- UI 事件优先成为 AI SDK stream chunk 或 message part。
+- 审计需要的数据必须落在 `messages`、`message.metadata` 或 Thread metadata 中。
+- `convertDataPart` 是例外路径，避免把大量 UI-only 数据误送给模型。
 
 ## Thread 列表 User Stories
 
@@ -161,8 +240,8 @@ Thread 列表只读取 ThreadStore，不加载完整 AgentStore 分区。
 用户打开 Thread
 -> Agent 读取 Thread metadata
 -> Agent 按 threadId 加载 AgentStore 分区
--> Agent 恢复 runState、history、events、pendingInteractions
--> UI 订阅 Agent event stream
+-> Agent 恢复 runState、messages、runtimeConfig
+-> UI 订阅 AI SDK UIMessage stream
 -> 展示 Thread 详情
 ```
 
@@ -207,50 +286,55 @@ type AgentPermission = "requestApproval" | "fullAccess";
 
 ## EventMessage UX
 
-| EventMessage | UX |
+EventMessage 是领域语言，实际承载优先使用 AI SDK `UIMessageChunk`、`UIMessage.parts`、tool state 和 message metadata。
+
+| EventMessage | AI SDK 承载 | UX |
 | --- | --- |
-| `agent_loaded` | Thread 详情数据加载完成。 |
-| `turn_started` | 新增执行中状态。 |
-| `user_message_added` | 展示用户输入。 |
-| `assistant_message_delta` | 流式展示 Agent 回复。 |
-| `reasoning_summary_delta` | 可折叠展示分析或规划摘要。 |
-| `jsapi_search_started` | 展示 Agent 正在查找文档能力。 |
-| `jsapi_search_completed` | 展示能力搜索摘要。 |
-| `tool_call_started` | 展示 Agent 正在读取、分析或规划。 |
-| `tool_call_completed` | 展示简短工具结果。 |
-| `change_plan_created` | 展示 Turn 级变更预览。 |
-| `approval_requested` | Turn 阻塞，等待用户确认或拒绝。 |
-| `approval_resolved` | 展示用户批准或拒绝结果。 |
-| `document_change_applied` | 展示应用结果。 |
-| `turn_completed` | 输入栏恢复可用。 |
-| `turn_failed` | 展示失败和重试入口。 |
-| `turn_interrupted` | 展示执行已停止。 |
+| `agent_loaded` | `data-agent-status` transient chunk | Thread 详情数据加载完成。 |
+| `turn_started` | `data-agent-status` part 或 metadata | 新增执行中状态。 |
+| `user_message_added` | `role: "user"` message | 展示用户输入。 |
+| `assistant_message_delta` | `text-start` / `text-delta` / `text-end` chunks | 流式展示 Agent 回复。 |
+| `reasoning_summary_delta` | `reasoning-start` / `reasoning-delta` / `reasoning-end` chunks | 可折叠展示分析或规划摘要。 |
+| `jsapi_search_started` | `tool-jsapiSearch` input state 或 transient `data-agent-status` | 展示 Agent 正在查找文档能力。 |
+| `jsapi_search_completed` | `tool-jsapiSearch` output state | 展示能力搜索摘要。 |
+| `tool_call_started` | AI SDK tool input state | 展示 Agent 正在读取、分析或规划。 |
+| `tool_call_completed` | AI SDK tool output state | 展示简短工具结果。 |
+| `change_plan_created` | `data-change-plan` part | 展示 Turn 级变更预览。 |
+| `approval_requested` | `applyChangePlan` tool approval requested state | Turn 阻塞，等待用户确认或拒绝。 |
+| `approval_resolved` | tool approval response state | 展示用户批准或拒绝结果。 |
+| `document_change_applied` | `applyChangePlan` tool output + summary text | 展示应用结果。 |
+| `turn_completed` | finish chunk + `data-agent-status` | 输入栏恢复可用。 |
+| `turn_failed` | error chunk + `data-agent-status` | 展示失败和重试入口。 |
+| `turn_interrupted` | abort chunk + `data-agent-status` | 展示执行已停止。 |
 
-EventMessage 主要服务 UI 和审计，不等同于模型历史。
+EventMessage 不再作为独立历史数组保存。需要恢复和审计的事件必须落入 `messages`、`message.metadata` 或 Thread metadata；纯临时事件使用 transient chunk。
 
-## Model Visible History
+## Messages As History
 
-`modelVisibleHistory` 保存会进入后续 Prompt 的结构化事实：
+`messages: WpsAgentUIMessage[]` 是 Agent 的唯一主历史：
 
 - User message。
 - Assistant message。
-- Reasoning summary。
-- Tool call。
-- Tool output。
-- Change plan。
-- Approval response。
-- Compact summary。
+- Reasoning part。
+- Tool call state。
+- Tool output state。
+- Tool approval request / response。
+- ChangePlan data part。
+- Document preview data part。
+- Citation data part。
+- Compact summary message or part。
 
 原则：
 
-- UI event 不直接进入模型历史。
-- 工具进度不直接进入模型历史。
-- Prompt 构建时会筛选、截断、归一化 `modelVisibleHistory`。
-- 长历史后续可以 compact 成 summary。
+- UI 渲染直接使用 `messages`。
+- 流式更新使用 `UIMessageChunk` 累积到 `messages`。
+- 模型调用从 `messages` 转成 `ModelMessage[]`。
+- 临时进度使用 `transient` data chunk，不落入最终 `messages`。
+- 长历史后续可以 compact 成 summary message 或 summary part。
 
 ## Prompt 构建
 
-Agent 每次模型采样都临时构建 Prompt，不直接发送 IndexedDB 原始历史。
+Agent 每次模型采样都基于 `messages` 临时构建 Prompt，不直接发送 IndexedDB 原始历史。
 
 Prompt 输入按以下顺序组装：
 
@@ -258,10 +342,12 @@ Prompt 输入按以下顺序组装：
 2. Development：Web WPS 场景规则、权限语义、审批规则、JSAPI delayed search 原则。
 3. Runtime config：模型、reasoning、权限。
 4. Context snapshot：文档 id、文档版本、选区、视口、附件引用。
-5. Model visible history：筛选后的历史事实。
+5. Messages history：从 `messages` 转换出的 `ModelMessage[]`。
 6. JSAPI capability search：只暴露 delayed search 入口，不暴露完整 JSAPI 目录。
 7. Current user message：当前 Turn 目标。
 8. Output requirement：最终回答、ChangePlan 或变更摘要。
+
+如果某个 `data-*` part 需要进入模型，Prompt builder 必须显式配置 `convertDataPart`。默认策略是：WPS UI-only data 不进入模型，模型需要长期看到的事实应通过 tool result、assistant text 或 compact summary 表达。
 
 ## JSAPI 原则
 
@@ -281,17 +367,17 @@ Prompt 输入按以下顺序组装：
 ```text
 用户发送消息
 -> Agent 设置 runState.running
--> Agent 创建 context snapshot
--> Agent 将 user message 写入 modelVisibleHistory
--> Agent 构建 Prompt
+-> Agent 将 user message 写入 messages
+-> Agent 将 context snapshot 写入 message metadata 或 data-context-snapshot
+-> Agent 基于 messages 构建 Prompt
 -> 模型搜索 JSAPI 能力
 -> Agent / 模型进行只读分析
--> Agent / 模型生成 ChangePlan
--> Agent 写入 pendingInteractions.approval
--> Agent 发出 approval_requested
+-> Agent / 模型生成 data-change-plan
+-> Agent 发起 applyChangePlan tool approval
+-> UI 展示 approval_requested
 -> 用户确认
 -> Agent 应用变更
--> Agent 写入 change summary
+-> Agent 写入 applyChangePlan tool output 和 change summary
 -> Agent 完成 Turn
 ```
 
@@ -300,11 +386,12 @@ Prompt 输入按以下顺序组装：
 ```text
 用户发送消息
 -> Agent 设置 runState.running
--> Agent 创建 context snapshot
--> Agent 构建 Prompt
+-> Agent 将 user message 写入 messages
+-> Agent 将 context snapshot 写入 message metadata 或 data-context-snapshot
+-> Agent 基于 messages 构建 Prompt
 -> 模型搜索 JSAPI 能力
 -> Agent 执行读取和写入
--> Agent 写入 change summary
+-> Agent 写入 tool output 和 change summary
 -> Agent 完成 Turn
 ```
 
@@ -312,8 +399,8 @@ Prompt 输入按以下顺序组装：
 
 ```text
 approval rejected
--> Agent 写入 approval_response
--> Agent 清理 pendingInteractions
+-> Agent 写入 tool approval response
+-> Agent 更新 runState
 -> 模型继续给出替代方案或结束 Turn
 ```
 
@@ -349,8 +436,10 @@ Turn started
 - Thread 只保存元数据。
 - Agent 是运行主干。
 - AgentStore 按 `threadId` 分区。
+- AgentStore 主历史采用 AI SDK `UIMessage`，不另建平行的 item/event/history 结构。
 - 运行数据按使用路径打平，不强制拆成 Session、Turn、Item、Event、Context 表。
 - Session、Turn、Item、EventMessage、Context 保留为领域语言和 service 视图。
 - 权限模型是 Thread 默认值加当前 Turn 临时覆盖。
-- 审批模型是 Turn 级汇总审批。
+- 审批模型是 Turn 级汇总审批，并通过 `applyChangePlan` tool approval 承载。
+- 自定义 WPS 事件和数据通过 AI SDK `data-*` part / chunk 承载；临时进度使用 `transient: true`。
 - JSAPI 细节等接入真实 codebase 时再设计。
